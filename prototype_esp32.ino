@@ -1,30 +1,22 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
 
-// ====== WiFi Config ======
-const char* ssid = "ssid";
-const char* password = "passwored";
+// Sensor pins
+#define TRIG_PIN1 3
+#define ECHO_PIN1 2
+#define TRIG_PIN2 9
+#define ECHO_PIN2 8
 
-// ====== Server Config ======
-// Change this to your server URL or endpoint
-String serverName = "http://your-server.com/api/";
+// -------------------- Parameters --------------------
+#define CAR_THRESHOLD 20   // cm: distance to detect a car
 
-// ====== Sensor Pins ======
-#define TRIG_PIN1 5
-#define ECHO_PIN1 18
-#define TRIG_PIN2 19
-#define ECHO_PIN2 21
-
-// ====== Car Detection Params ======
-#define CAR_THRESHOLD 20      // cm
-#define MAX_WAIT 10000        // ms
-
-// ====== Variables ======
+// -------------------- Global Variables --------------------
 int carCount = 0;
-bool sensor1Triggered = false;
-unsigned long sensor1Time = 0;
+bool waitingForSensor2 = false;
 
+// Track previous state of Sensor 2 for edge detection
+bool sensor2PreviouslyHigh = false;
+
+// -------------------- Functions --------------------
 long getDistanceCM(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -32,87 +24,52 @@ long getDistanceCM(int trigPin, int echoPin) {
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  long duration = pulseIn(echoPin, HIGH, 40000);
-  if (duration == 0) return -1; 
+  long duration = pulseIn(echoPin, HIGH, 40000); // 40 ms timeout
+  if (duration == 0) return -1;
   long distance = duration * 0.034 / 2;
   return distance > 400 ? 400 : distance;
 }
 
-void sendCarCount() {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-
-    http.begin(serverName);  
-    http.addHeader("Content-Type", "application/json");
-
-    // Prepare JSON data
-    String payload = "{\"car_count\": " + String(carCount) + "}";
-
-    int httpResponseCode = http.POST(payload);
-
-    if (httpResponseCode > 0) {
-      Serial.print("POST Response code: ");
-      Serial.println(httpResponseCode);
-    } else {
-      Serial.print("Error sending POST: ");
-      Serial.println(httpResponseCode);
-    }
-    http.end();
-  } else {
-    Serial.println("WiFi not connected cannot send data");
-  }
-}
-
+// -------------------- Setup --------------------
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   pinMode(TRIG_PIN1, OUTPUT);
   pinMode(ECHO_PIN1, INPUT);
-
   pinMode(TRIG_PIN2, OUTPUT);
   pinMode(ECHO_PIN2, INPUT);
 
-  // WiFi connect
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
+  Serial.println("Traffic counter started");
 }
 
+// -------------------- Main Loop --------------------
 void loop() {
   long dist1 = getDistanceCM(TRIG_PIN1, ECHO_PIN1);
   delay(50);
   long dist2 = getDistanceCM(TRIG_PIN2, ECHO_PIN2);
   delay(50);
 
-  unsigned long currentMillis = millis();
+  // If not waiting for sensor2, check sensor1
+  if (!waitingForSensor2) {
+    if (dist1 != -1 && dist1 < CAR_THRESHOLD) {
+      waitingForSensor2 = true;
+      Serial.println("Sensor 1 detected car, waiting for sensor 2...");
+    }
+  } 
+  // If waiting for sensor2
+  else {
+    bool sensor2High = (dist2 != -1 && dist2 < CAR_THRESHOLD);
 
-  // Sensor 1 detects car
-  if (!sensor1Triggered && dist1 != -1 && dist1 < CAR_THRESHOLD) {
-    sensor1Triggered = true;
-    sensor1Time = currentMillis;
-    Serial.println("Sensor 1 detected car, timer started");
-  }
-
-  // Sensor 2 detects car within 10s
-  if (sensor1Triggered && dist2 != -1 && dist2 < CAR_THRESHOLD) {
-    if (currentMillis - sensor1Time <= MAX_WAIT) {
+    // Only increment when sensor2 transitions from no car → car detected
+    if (sensor2High && !sensor2PreviouslyHigh) {
       carCount++;
       Serial.print("Car passed! Total: ");
       Serial.println(carCount);
 
-      sendCarCount();  // 🚀 Send data to server
-
-      sensor1Triggered = false;
+      // Reset for next car
+      waitingForSensor2 = false;
     }
-  }
 
-  // Timer expired
-  if (sensor1Triggered && currentMillis - sensor1Time > MAX_WAIT) {
-    sensor1Triggered = false;
-    Serial.println("Timer expired, no car detected on sensor 2");
+    sensor2PreviouslyHigh = sensor2High;
   }
 }
